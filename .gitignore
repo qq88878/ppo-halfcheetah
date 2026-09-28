@@ -1,0 +1,14 @@
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# 空目录 / 本地临时文件
+true/
+notes_append.xml

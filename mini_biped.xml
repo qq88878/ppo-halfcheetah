@@ -1,0 +1,127 @@
+<!-- ============================================================
+     mini_biped.xml —— MuJoCo 完整原型：迷你双足机器人
+     覆盖组件：body 树 / freejoint / hinge / tendon / motor /
+              position / sensor / geom / default / camera / light
+     加载方式见 mini_biped_view.py
+     ============================================================ -->
+<mujoco model="mini_biped">
+
+  <!-- ① 全局编译设置：关节角度单位用弧度（MuJoCo 默认就是弧度，显式声明更清晰） -->
+  <compiler angle="radian"/>
+
+  <!-- ② 仿真选项：timestep=物理步长 0.01 秒/步；gravity=重力 z 轴向下 9.81 m/s2 -->
+  <option timestep="0.01" gravity="0 0 -9.81"/>
+
+  <!-- ③ 资产：材质（决定几何体颜色） -->
+  <asset>
+    <!-- 机器人身体：蓝色 -->
+    <material name="body_mat" rgba=".3 .6 .9 1"/>
+    <!-- 地面：灰色 -->
+    <material name="ground_mat" rgba=".85 .85 .85 1"/>
+  </asset>
+
+  <!-- ④ 默认参数：子元素没写的属性全部继承这里，写 XML 时少重复 -->
+  <default>
+    <!-- 默认几何体：胶囊，半径 0.04 -->
+    <geom type="capsule" size=".04" material="body_mat"/>
+    <!-- 默认关节：hinge（绕 y 轴旋转），阻尼 1（被动阻力，防抖） -->
+    <joint type="hinge" axis="0 1 0" damping="1"/>
+    <!-- 默认电机：力矩范围 [-1,1]（这就是 action 空间的源头） -->
+    <motor ctrlrange="-1 1" ctrllimited="true"/>
+  </default>
+
+  <!-- ⑤ 世界坐标系：光源、相机、地面、机器人本体 -->
+  <worldbody>
+    <!-- 光源：头顶 3 米处 -->
+    <light pos="0 0 3"/>
+    <!-- 相机：正面 3 米外，xyaxes 指定朝向 -->
+    <camera name="cam" pos="0 -3 1" xyaxes="1 0 0 0 1 0"/>
+    <!-- 地面：plane 平面，size 前两个数是半长宽 -->
+    <geom name="ground" type="plane" size="2 2 .1" material="ground_mat"/>
+
+    <!-- ⑥ 躯干（根 body）：pos 是世界坐标，离地 0.8 米 -->
+    <body name="torso" pos="0 0 .8">
+      <!-- 自由关节：躯干在世界中 6 自由度（3 平移 + 3 旋转），对比 HalfCheetah 用 3 个世界关节 -->
+      <freejoint/>
+      <!-- 躯干几何：长方体，size 是半尺寸 -->
+      <geom type="box" size=".25 .08 .1"/>
+
+      <!-- 左腿：thigh 到 shin 到 foot 三级嵌套，pos 相对父 body -->
+      <!-- 左大腿：相对躯干 (-0.15,0,0)，即髋关节安装点 -->
+      <body name="l_thigh" pos="-.15 0 0">
+        <!-- 髋关节：hinge 绕 y 轴，限位 ±0.5 弧度（约 ±28.6 度） -->
+        <joint name="l_hip" range="-.5 .5"/>
+        <!-- 大腿几何：fromto 两点定胶囊，从髋 (0,0,0) 到膝 (0,0,-0.3) -->
+        <geom fromto="0 0 0 0 0 -.3"/>
+        <!-- 左小腿：相对大腿向下 0.3 -->
+        <body name="l_shin" pos="0 0 -.3">
+          <!-- 膝关节：只能向后弯 0 到 -1.2 弧度（大腿不会向前折） -->
+          <joint name="l_knee" range="-1.2 0"/>
+          <geom fromto="0 0 0 0 0 -.3"/>
+          <!-- 左脚：相对小腿向下 0.3 -->
+          <body name="l_foot" pos="0 0 -.3">
+            <!-- 脚掌：往前伸的小方块 -->
+            <geom type="box" size=".06 .03 .03" pos=".03 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- 右腿：结构与左腿完全相同（右髋由 tendon 联动，见⑦） -->
+      <body name="r_thigh" pos=".15 0 0">
+        <joint name="r_hip" range="-.5 .5"/>
+        <geom fromto="0 0 0 0 0 -.3"/>
+        <body name="r_shin" pos="0 0 -.3">
+          <joint name="r_knee" range="-1.2 0"/>
+          <geom fromto="0 0 0 0 0 -.3"/>
+          <body name="r_foot" pos="0 0 -.3">
+            <geom type="box" size=".06 .03 .03" pos=".03 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- 手臂：用来演示 position 执行器（伺服，ctrl 给目标角度） -->
+      <body name="arm" pos=".25 0 .05">
+        <!-- 肘关节：绕 z 轴侧摆（和腿的 y 轴区分开），限位 0~1.5 弧度 -->
+        <joint name="elbow" axis="0 0 1" range="0 1.5"/>
+        <!-- 手臂几何：水平向前伸的胶囊 -->
+        <geom fromto="0 0 0 .2 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- ⑦ 肌腱：把两个髋关节绑起来（机械联动） -->
+  <tendon>
+    <!-- 固定长度肌腱：长度 = 1×左髋角度 + (-1)×右髋角度 = 常数 -->
+    <fixed name="hip_link">
+      <!-- 左髋 +1 倍角度 -->
+      <joint joint="l_hip" coef="1"/>
+      <!-- 右髋 -1 倍角度（反向！） -->
+      <joint joint="r_hip" coef="-1"/>
+    </fixed>
+  </tendon>
+  <!-- 效果：左髋往前摆多少度，右髋自动往后摆多少度 -->
+  <!-- 这就是行走步态里的反相联动：一个 hip_motor 带两条腿 -->
+
+  <!-- ⑧ 执行器：3 个电机（力矩控制）+ 1 个位置伺服（角度控制） -->
+  <actuator>
+    <!-- 左髋电机：motor=给力矩；gear=50 传动比（力矩放大倍数） -->
+    <motor name="hip_motor" joint="l_hip" gear="50"/>
+    <!-- 左膝电机 -->
+    <motor name="l_knee_motor" joint="l_knee" gear="30"/>
+    <!-- 右膝电机 -->
+    <motor name="r_knee_motor" joint="r_knee" gear="30"/>
+    <!-- 手臂位置伺服：position=ctrl 是目标角度，kp=伺服刚度，像 UR5e 那样有伺服帮忙转 -->
+    <position name="elbow_pos" joint="elbow" kp="50"/>
+  </actuator>
+
+  <!-- ⑨ 传感器：读状态（给 RL 当 obs 或调试用） -->
+  <sensor>
+    <!-- 左髋角度（弧度） -->
+    <jointpos joint="l_hip"/>
+    <!-- 左膝角速度（弧度/秒） -->
+    <jointvel joint="l_knee"/>
+    <!-- 左髋关节受到的执行器合力（腱+电机的总反作用力） -->
+    <jointactuatorfrc joint="l_hip"/>
+  </sensor>
+
+</mujoco>
