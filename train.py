@@ -1,4 +1,5 @@
 from os.path import exists
+import csv
 
 import gymnasium as gym
 import torch
@@ -60,10 +61,15 @@ for iteration in range(max_iterations):
     ppo = PPO(actor, critic, buffer, epochs, advantages, returns)
     ppo.update()
 
-    # === 4. 打印 reward ===
+    # === 4. 打印 reward + 记录日志（供 plot_results.py 出图） ===
     if iteration % 10 == 0:
         avg_reward = np.mean(episode_rewards[-10:]) if episode_rewards else 0
         print(f"Iteration {iteration}, avg reward: {avg_reward:.1f}")
+        with open("training_log.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            if iteration == 0:  # 首次写入表头
+                writer.writerow(["iteration", "avg_reward", "num_episodes"])
+            writer.writerow([iteration, round(avg_reward, 2), len(episode_rewards)])
 
 print("训练完成！")
 # 保存 actor
