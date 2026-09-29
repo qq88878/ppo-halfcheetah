@@ -269,11 +269,10 @@ class StandUpWrapper(gym.Wrapper):
 ## 6. 训练结果
 
 > 训练 1000 iteration，reward 曲线整体上升（单局有波动属正常，看平均趋势）。
-> 下图请替换成你自己的训练输出截图：
 
-```
-（在此插入 reward 曲线截图）
-```
+![PPO 训练 reward 曲线](reward_curve.png)
+
+> 出图方法：`python train.py` 训练（每 10 iteration 自动写 `training_log.csv`），训练完执行 `python plot_results.py` 生成 `reward_curve.png`。
 
 **观察到的效果**：
 - 训练前（随机策略）：猎豹原地乱动，reward ≈ 0
