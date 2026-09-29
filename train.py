@@ -1,5 +1,6 @@
 from os.path import exists
 import csv
+import argparse
 
 import gymnasium as gym
 import torch
@@ -16,17 +17,27 @@ gamma = 0.99
 lam = 0.95
 max_iterations = 1000
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--fresh", action="store_true",
+                    help="从零训练，不加载已有的 actor.pt/critic.pt（默认：续训）")
+parser.add_argument("--no-render", action="store_true",
+                    help="训练完成后不弹窗渲染（默认：弹窗看效果）")
+parser.add_argument("--iters", type=int, default=1000,
+                    help="训练迭代次数（默认 1000）")
+args = parser.parse_args()
+max_iterations = args.iters
+
 env = gym.make("HalfCheetah-v5")
 env = StandUpWrapper(env, min_height=0.3, penalty=1.0)  # 加摔倒惩罚
 obs_dim = env.observation_space.shape[0]  # 17
 act_dim = env.action_space.shape[0]        # 6
 
 actor = Actor(obs_dim, act_dim)
-if exists("actor.pt"):
+if not args.fresh and exists("actor.pt"):
    actor.load_state_dict(torch.load("actor.pt"))
 critic = Critic(obs_dim)
 
-if exists("critic.pt"):
+if not args.fresh and exists("critic.pt"):
  critic.load_state_dict(torch.load("critic.pt"))
 buffer = RolloutBuffer(rollout_size, obs_dim, act_dim)
 
@@ -77,6 +88,11 @@ torch.save(actor.state_dict(), "actor.pt")
 
 # 保存 critic
 torch.save(critic.state_dict(), "critic.pt")
+
+if args.no_render:
+    print("--no-render：跳过渲染，直接结束。")
+    env.close()
+    exit()
 
 # 关闭训练环境，重新创建带渲染的环境
 env.close()
