@@ -29,7 +29,8 @@ class PPO():
 
         for _ in range(self.epoch):
             dist=self.actor.get_dist(obs)
-            new_logp=dist.log_prob(actions).sum(-1)#这里为啥还需要个sum?newlogp是不是当前参数再次预测这些action对概率进行提取后续与old进行对比修改
+            u=0.5*torch.log((1+actions.clamp(-0.9999,0.9999))/(1-actions.clamp(-0.9999,0.9999)))
+            new_logp=dist.log_prob(u).sum(-1)-torch.log(1-actions**2+1e-6).sum(-1)#这里为啥还需要个sum?newlogp是不是当前参数再次预测这些action对概率进行提取后续与old进行对比修改
 
             ratio=torch.exp(new_logp-old_logp)#这里就是算变化的比率，但为啥exp中间是减法，不是二者做商吗
 
@@ -47,5 +48,6 @@ class PPO():
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(list(self.actor.parameters())+list(self.critic.parameters()), 0.5)
             optimizer.step()
 

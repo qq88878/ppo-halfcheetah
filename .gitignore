@@ -12,3 +12,5 @@ __pycache__/
 # 空目录 / 本地临时文件
 true/
 notes_append.xml
+err.txt
+*_old_backup.pt

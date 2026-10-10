@@ -37,6 +37,8 @@ Agent 与 MuJoCo 环境交互收集轨迹 → 存入 RolloutBuffer → GAE 计�
 | `train.py` | 训练主循环（收集 → GAE → update → 保存） |
 | `reward_wrapper.py` | 摔倒惩罚 Wrapper（额外实验） |
 | `test.py` | 加载模型渲染测试（带摄像头跟随） |
+| `compare_curves.py` | 拆分三次训练日志并绘制新旧对比图 |
+| `plot_results.py` | 绘制单次训练 reward 曲线 |
 | `actor.pt` / `critic.pt` | 训练好的模型参数 |
 
 ---
@@ -85,49 +87,47 @@ Iteration 1000, avg reward: 2000+
 
 ## 5. 核心算法：逐文件讲解
 
-### 5.1 net.py — 两个网络
+### 5.1 net.py — 两个网络（tanh 进阶版）
 
 ```python
 class Actor(nn.Module):
-    def __init__(self, state_dim=17, action_dim=6, hidden=64):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, hidden)
-        self.fc2 = nn.Linear(hidden, hidden)
-        self.fc3 = nn.Linear(hidden, action_dim)      # 输出 6 维动作均值
-        self.log_std = nn.Parameter(torch.zeros(6) - 0.5)  # 标准差（可学习参数）
-
-    def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)   # 这就是高斯分布的 mean
-
-    def get_dist(self, obs):
-        mean = self.forward(obs)
-        std = self.log_std.exp()
-        return torch.distributions.Normal(mean, std)  # 6 个独立高斯分布
-
-    def get_action(self, obs):
-        dist = self.get_dist(obs)
-        action = dist.sample()                        # 采样动作（带探索）
-        log_prob = dist.log_prob(action).sum(-1)      # 该动作的对数概率
-        return action, log_prob
+  def __init__(self,state_dim=17,action_dim=6,hidden=64):
+     super().__init__()
+     self.fc1=nn.Linear(state_dim,hidden)
+     self.fc2=nn.Linear(hidden,hidden)
+     self.fc3=nn.Linear(hidden,action_dim)      # 输出 6 维动作均值
+     self.log_std=nn.Parameter(torch.zeros(6)-0.5)  # 标准差（可学习参数）
+  def forward(self,obs):
+     x=F.relu(self.fc1(obs))
+     x=F.relu(self.fc2(x))
+     return self.fc3(x)                        # 这就是高斯分布的 mean
+  def get_dist(self,obs):
+     mean=self.forward(obs)
+     std=self.log_std.exp().clamp(min=1e-3)    # 标准差加下限：防 σ→0 数值爆炸
+     return torch.distributions.Normal(mean,std)
+  def get_action(self,obs):
+     dist=self.get_dist(obs)
+     u=dist.sample()                           # 采样原始高斯 u（可能越界）
+     action=torch.tanh(u)                      # tanh 平滑压进 (-1,1)，动作永远合法
+     log_prob=dist.log_prob(u).sum(-1)-torch.log(1-action**2+1e-6).sum(-1)  # 雅可比修正
+     return action,log_prob
 
 class Critic(nn.Module):
-    def __init__(self, obs=17, hidden=64):
-        super().__init__()
-        self.fc1 = nn.Linear(obs, hidden)
-        self.fc2 = nn.Linear(hidden, hidden)
-        self.fc3 = nn.Linear(hidden, 1)               # 输出一个价值 V(s)
-
-    def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+ def __init__(self,obs=17,hidden=64):
+     super().__init__()
+     self.fc1=nn.Linear(obs,hidden)
+     self.fc2=nn.Linear(hidden,hidden)
+     self.fc3=nn.Linear(hidden,1)              # 输出一个价值 V(s)
+ def forward(self,obs):
+     x=F.relu(self.fc1(obs))
+     x=F.relu(self.fc2(x))
+     return self.fc3(x)
 ```
 
 **要点**：
 - Actor 不直接输出动作，而是输出一个**高斯分布的 mean**，配合可学习的 `log_std` 组成分布，采样得到动作 → 保证有探索性。
-- `log_prob` 是"这个动作被当前策略选中的概率（对数）"，PPO 用它算新旧策略的概率比。
+- **tanh 压缩**：`action = tanh(u)` 把任意实数平滑压进 (-1,1)，对齐 HalfCheetah 动作边界，是 SAC / 现代 PPO 的标准做法（Gaussian + Squash）。
+- **雅可比修正**：`log p(a) = log p(u) − log(1−a²)`，把 tanh 挤压造成的概率密度变化补偿回去；采样侧与更新侧用同一公式，ratio 才自洽。
 - Critic 输出一个标量 V(s)，是"从 state s 出发未来累计奖励"的预测，作为 Actor 的"基线"。
 
 ### 5.2 buffer.py — 经验回放缓冲区
@@ -172,7 +172,7 @@ def compute_gae(buffer, gamma=0.99, lam=0.95):
 - 从后往前累加（`γλ` 递减），离当前越远的未来影响越小。
 - `advantages` 给 Actor 用（这个动作比平均好多少）；`returns` 给 Critic 用（拟合目标）。
 
-### 5.4 ppo.py — PPO 核心（clip 损失）
+### 5.4 ppo.py — PPO 核心（clip 损失 + tanh 更新侧反解）
 
 ```python
 class PPO():
@@ -180,16 +180,15 @@ class PPO():
         self.actor = actor
         self.critic = critic
         self.buffer = buffer
-        self.returns = returns
-        self.advantages = advantages
-        self.epoch = epoch
+        self.returns = returns       # 给 Critic 的训练目标
+        self.advantages = advantages # 给 Actor 的优势
+        self.epoch = epoch           # 同一批 buffer 数据复用 epochs 次
         self.lr = 3e-4
-        self.clip_eps = 0.2    # clip 范围 ±0.2
-        self.ent_coef = 0.01   # 熵正则系数（鼓励探索）
-        self.val_coef = 0.5    # 价值损失系数
+        self.clip_eps = 0.2          # clip 范围 ±0.2
+        self.ent_coef = 0.01         # 熵正则系数（鼓励探索）
+        self.val_coef = 0.5          # 价值损失系数
 
     def update(self):
-        # 从 buffer 取数据
         obs = torch.from_numpy(self.buffer.obs[:self.buffer.size])
         actions = torch.from_numpy(self.buffer.actions[:self.buffer.size])
         old_logp = torch.from_numpy(self.buffer.log_probs[:self.buffer.size])
@@ -199,12 +198,15 @@ class PPO():
         optimizer = torch.optim.Adam(
             list(self.actor.parameters()) + list(self.critic.parameters()), self.lr)
 
-        # 优势标准化：减均值除标准差，稳定训练
+        # 优势标准化：减均值除标准差，稳定训练（对整个 batch 做一次）
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        for _ in range(self.epoch):   # 同一批数据复用 epochs 次
+        for _ in range(self.epoch):
             dist = self.actor.get_dist(obs)
-            new_logp = dist.log_prob(actions).sum(-1)
+            # 更新侧：buffer 存的是压缩后的 a，先用 arctanh 反解回 u（同一公式才自洽）
+            u = 0.5*torch.log((1+actions.clamp(-0.9999,0.9999)) /
+                              (1-actions.clamp(-0.9999,0.9999)))
+            new_logp = dist.log_prob(u).sum(-1) - torch.log(1-actions**2+1e-6).sum(-1)
 
             ratio = torch.exp(new_logp - old_logp)   # 新旧策略概率比
 
@@ -220,6 +222,9 @@ class PPO():
 
             optimizer.zero_grad()
             loss.backward()
+            # 梯度裁剪：即使单步梯度异常大，也限制最大范数，防 NaN 崩溃
+            torch.nn.utils.clip_grad_norm_(
+                list(self.actor.parameters()) + list(self.critic.parameters()), 0.5)
             optimizer.step()
 ```
 
@@ -227,6 +232,8 @@ class PPO():
 - `ratio = exp(new_logp - old_logp)`：当前策略对这批动作的"喜欢程度"相比采样时的变化倍数。
 - `clip`：把 ratio 限制在 `[0.8, 1.2]`，防止一次更新太猛导致策略崩掉。
 - `min(sur1, sur2)`：只在"变好时奖励、变差时惩罚"的单侧截断（PPO 的精髓）。
+- **更新侧 arctanh 反解**：buffer 只存了压缩后的动作 a，高斯分布只认 u 坐标，所以必须先 `arctanh` 反解回 u 再查 `log_prob(u)`，并减去同样的雅可比修正——两侧公式一致，ratio 自洽。
+- **梯度裁剪**：`clip_grad_norm_(0.5)` 在 backward 后、step 前执行，给更新步长设硬上限，防止 log_prob 数值爆炸冲掉权重。
 - 三个损失：策略损失 + 价值损失 + 熵正则（负号表示鼓励熵更大 = 更多探索）。
 
 ### 5.5 train.py — 训练主循环
@@ -268,16 +275,25 @@ class StandUpWrapper(gym.Wrapper):
 
 ## 6. 训练结果
 
-> 训练 1000 iteration，reward 曲线整体上升（单局有波动属正常，看平均趋势）。
+> 训练 1000 iteration（tanh 修复版），reward 曲线整体上升且无 NaN，峰值 **2404.0@970**。
 
-![PPO 训练 reward 曲线](reward_curve.png)
+![PPO 训练 reward 曲线（tanh 修复版）](reward_curve_compare.png)
 
-> 出图方法：`python train.py` 训练（每 10 iteration 自动写 `training_log.csv`），训练完执行 `python plot_results.py` 生成 `reward_curve.png`。
+> 出图方法：`python train.py` 训练（每 10 iteration 自动写 `training_log.csv`），训练完执行 `python compare_curves.py` 生成新旧对比图 `reward_curve_compare.png`（旧版 / tanh 首跑崩溃版 / tanh 修复版三段对比，含滑均曲线与崩溃点标注）。
+
+**tanh 进阶前后对比**（同一超参、同一环境）：
+
+| 版本 | 起点 | 终点 | 峰值 |
+|---|---|---|---|
+| 旧版（无 tanh，高斯直接采样） | -167.7 | 1976.7 | 2131.4@940 |
+| tanh 首跑（未加数值保护） | -203.7 | — | **630 迭代 NaN 崩溃** |
+| **tanh 修复版（std 下限 + clamp + 梯度裁剪）** | **-73.6** | **2374.1** | **2404.0@970（+12.8%）** |
 
 **观察到的效果**：
 - 训练前（随机策略）：猎豹原地乱动，reward ≈ 0
-- 训练后（PPO）：猎豹能稳定向前奔跑，reward 1000 ~ 2000+
+- 训练后（PPO）：猎豹能稳定向前奔跑，reward 1000 ~ 2400
 - 加摔倒惩罚后：猎豹倾向于保持躯干高度，减少翻滚行为
+- tanh 版：动作永远落在 [-1,1]，收敛更快更稳、峰值更高；完整 1000 迭代无 NaN
 
 ---
 
@@ -289,6 +305,7 @@ class StandUpWrapper(gym.Wrapper):
 4. **摄像头不跟随**：新版 renderer 没有 `cam` 属性，用 `_get_viewer("human")` 后手动设 `viewer.cam.lookat = torso_pos`。
 5. **渲染太快**：每步加 `time.sleep(0.02)` 放慢。
 6. **优势标准化位置**：`adv` 在循环外做一次标准化（对整个 batch），不要在 epoch 循环内重复做。
+7. **tanh 版 NaN 崩溃**：训练后期 σ→0 + action 接近 ±1 → arctanh 反解出极端 u → log_prob 爆炸。三处修复：`std = log_std.exp().clamp(min=1e-3)`、`actions.clamp(-0.9999, 0.9999)` 后再 arctanh、`clip_grad_norm_(params, 0.5)` 梯度裁剪。
 
 ---
 
@@ -299,6 +316,8 @@ class StandUpWrapper(gym.Wrapper):
 3. **on-policy 与样本复用**：PPO 是 on-policy，但用比率修正让同一批 buffer 数据可复用 epochs 次。
 4. **GAE 为什么从后往前滚**：用 TD 误差加权累计，平衡偏差与方差（λ 控制看多远）。
 5. **reward 工程**：原生 reward 没有站立惩罚 → Wrapper 加惩罚改变行为。
+6. **tanh 进阶（Gaussian + Squash）**：动作有边界时不用 clip 而用 tanh 平滑压缩 + 雅可比修正 `log p(a) = log p(u) − log(1−a²)`，采样侧与更新侧同一公式保证 ratio 自洽——对齐 SAC / 现代 PPO 标准做法，也是真机部署动作边界安全的第一道闸门。
+7. **数值稳定性实战**：训练中真实遇到 NaN 崩溃，定位完整链路（σ→0 × arctanh 极端 u → log_prob 爆炸），三处修复后稳定收敛且峰值 +12.8%——展示的不是"我调好了"，而是定位数值 bug 的能力。
 
 ---
 

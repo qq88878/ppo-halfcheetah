@@ -16,12 +16,13 @@ class Actor(nn.Module):
      return self.fc3(x)
   def get_dist(self,obs):
      mean=self.forward(obs)
-     std=self.log_std.exp()
+     std=self.log_std.exp().clamp(min=1e-3)
      return torch.distributions.Normal(mean,std)
   def get_action(self,obs):
      dist=self.get_dist(obs)
-     action=dist.sample()
-     log_prob=dist.log_prob(action).sum(-1)
+     u=dist.sample()
+     action=torch.tanh(u)
+     log_prob=dist.log_prob(u).sum(-1)-torch.log(1-action**2+1e-6).sum(-1)#+1e-6防止log0出现梯度爆炸
      return action,log_prob
 class Critic(nn.Module):
  def __init__(self,obs=17,hidden=64):
